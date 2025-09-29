@@ -1,7 +1,7 @@
 import math
 from dataclasses import dataclass
 import matplotlib.pyplot as plt
-from qiskit.circuit.library import PhaseOracle
+from qiskit.circuit.library import PhaseOracleGate
 from qiskit_algorithms import Grover, AmplificationProblem, GroverResult
 from qiskit.primitives import StatevectorSampler
 
@@ -60,7 +60,7 @@ def costas_oracle(n):
                 clauses.append(f"~{eq(add(R[i],R[l]),add(R[j],R[k]))}")
     expr = " & ".join(clauses)
     var_order = [v for row in R for v in row]
-    return PhaseOracle(expr, var_order=var_order), m
+    return PhaseOracleGate(expr, var_order=var_order, label="CostasOracle"), m
 
 
 def decode(n, m, bitstr):
