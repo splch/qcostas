@@ -1,4 +1,5 @@
 import math
+import matplotlib.pyplot as plt
 from qiskit.circuit.library import PhaseOracle
 from qiskit_algorithms import Grover, AmplificationProblem
 from qiskit.primitives import StatevectorSampler
@@ -69,6 +70,21 @@ def is_costas(p):
                 return False
             s.add(t)
     return True
+
+
+def plot_costas(p):
+    n = len(p)
+    ax = plt.imshow(
+        [[j + 1 == p[n - 1 - i] for j in range(n)] for i in range(n)],
+        cmap="Greys",
+        vmin=0,
+        vmax=1,
+    ).axes
+    ax.set_xticks(range(n), range(1, n + 1))
+    ax.set_yticks(range(n), range(n, 0, -1))
+    ax.set_xticks([i - 0.5 for i in range(1, n)], minor=True)
+    ax.set_yticks([i - 0.5 for i in range(1, n)], minor=True)
+    ax.grid(which="minor", c="#ccc")
 
 
 def generate_costas(n):
