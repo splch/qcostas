@@ -1,8 +1,21 @@
 import math
+from dataclasses import dataclass
 import matplotlib.pyplot as plt
 from qiskit.circuit.library import PhaseOracle
-from qiskit_algorithms import Grover, AmplificationProblem
+from qiskit_algorithms import Grover, AmplificationProblem, GroverResult
 from qiskit.primitives import StatevectorSampler
+
+
+@dataclass(frozen=True)
+class CostasResult:
+    N: int
+    M: int
+    r: int
+    permutation: list[int]
+    is_costas: bool
+    grover: Grover
+    problem: AmplificationProblem
+    result: GroverResult
 
 
 def costas_oracle(n):
@@ -98,12 +111,13 @@ def generate_costas(n):
     problem = AmplificationProblem(oracle)
     result = grover.amplify(problem)
     permutation = decode(n, m, result.top_measurement)
-    return permutation, {
-        "grover": grover,
-        "problem": problem,
-        "result": result,
-        "is_costas": is_costas(permutation),
-        "N": N,
-        "M": M,
-        "r": r,
-    }
+    return CostasResult(
+        N=N,
+        M=M,
+        r=r,
+        grover=grover,
+        problem=problem,
+        result=result,
+        permutation=permutation,
+        is_costas=is_costas(permutation),
+    )
