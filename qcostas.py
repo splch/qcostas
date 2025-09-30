@@ -1,107 +1,103 @@
 from dataclasses import dataclass
+from functools import reduce
+from typing import cast
 import matplotlib.pyplot as plt
+from qiskit_algorithms import Grover, GroverResult, AmplificationProblem
 from qiskit.circuit.library import PhaseOracleGate
-from qiskit_algorithms import Grover, AmplificationProblem, GroverResult
 from qiskit.primitives import StatevectorSampler
 
 
 @dataclass(frozen=True)
 class CostasResult:
-    N: int
-    iterations: int
-    permutation: list[int]
-    is_costas: bool
+    order: int
+    qubits: int
     grover: Grover
     problem: AmplificationProblem
     result: GroverResult
+    iterations: int
+    permutation: list[int]
+    is_costas: bool
 
 
 def costas_oracle(n: int) -> tuple[PhaseOracleGate, int]:
     m = (n - 1).bit_length()
-    V = lambda i, b: f"x{i}_{b}"
-    XNOR = lambda a, b: f"~({a}^{b})"
-    ne = lambda A, B: "(" + "|".join(f"({a}^{b})" for a, b in zip(A, B)) + ")"
-
-    def const_eq(A, v: int) -> str:
-        return (
-            "("
-            + "&".join((A[k] if ((v >> k) & 1) else f"~{A[k]}") for k in range(len(A)))
-            + ")"
-        )
-
-    def lt(A, B) -> str:
-        m = len(A)
-        terms = []
-        for k in range(m - 1, -1, -1):
-            eq_pref = (
-                "&".join(XNOR(A[j], B[j]) for j in range(k + 1, m))
-                if k < m - 1
-                else "1"
-            )
-            terms.append(
-                f"(({eq_pref})&(~{A[k]}&{B[k]}))"
-                if eq_pref != "1"
+    V = lambda i, k: f"x{i:03d}_{k:02d}"  # zero-padded names -> natural variable order
+    R = [[V(i, k) for k in range(m)] for i in range(n)]  # row registers (little-endian)
+    XNOR = lambda a, b: f"~({a}^{b})"  # logical equality
+    NE = (
+        lambda A, B: "(" + "|".join(f"({a}^{b})" for a, b in zip(A, B)) + ")"
+    )  # not equal
+    EQ = (
+        lambda A, B: "("
+        + "&".join((A[k] if (B >> k) & 1 else f"~{A[k]}") for k in range(len(A)))
+        + ")"
+    )  # equal to integer B
+    LT = (
+        lambda A, B: "("
+        + "|".join(
+            (
+                f"(({ '&'.join(XNOR(A[j], B[j]) for j in range(k+1, len(A))) })&(~{A[k]}&{B[k]}))"
+                if k < len(A) - 1
                 else f"(~{A[k]}&{B[k]})"
             )
-        return "(" + "|".join(terms) + ")"
-
-    def add(A, B) -> list[str]:
-        c = "0"
-        S = []
-        for k in range(m):
-            ax, bx = A[k], B[k]
-            S.append(f"(({ax}^{bx})^{c})" if c != "0" else f"({ax}^{bx})")
-            c = f"(({ax}&{bx})|(({ax}^{bx})&{c}))" if c != "0" else f"({ax}&{bx})"
-        S.append(c)
-        return S  # length m+1
-
-    R = [[V(i, k) for k in range(m)] for i in range(n)]
+            for k in range(len(A) - 1, -1, -1)
+        )
+        + ")"
+    )  # less than integer B
+    ADD = lambda A, B: (lambda S_c: S_c[0] + [S_c[1]])(
+        reduce(
+            lambda acc, ab: (
+                acc[0]
+                + [
+                    (
+                        f"(({ab[0]}^{ab[1]})^{acc[1]})"
+                        if acc[1] != "0"
+                        else f"({ab[0]}^{ab[1]})"
+                    )
+                ],
+                (
+                    f"(({ab[0]}&{ab[1]})|(({ab[0]}^{ab[1]})&{acc[1]}))"
+                    if acc[1] != "0"
+                    else f"({ab[0]}&{ab[1]})"
+                ),
+            ),
+            zip(A, B),
+            cast(tuple[list[str], str], ([], "0")),
+        )
+    )  # add two binary numbers, return sum bits (little-endian)
     clauses = []
-    # domain r_i in {0,..,n-1}
+    # domain clamp if n not a power of two
     if (1 << m) != n:
-        for i in range(n):
-            for v in range(n, 1 << m):
-                clauses.append(f"~{const_eq(R[i], v)}")
-    # all-different rows
-    for i in range(n):
-        for j in range(i + 1, n):
-            clauses.append(ne(R[i], R[j]))
-    # Costas: differences unique at each lag d (use a+d == b+c equality test)
+        clauses += [f"~{EQ(R[i], v)}" for i in range(n) for v in range(n, 1 << m)]
+    # all different
+    clauses += [NE(R[i], R[j]) for i in range(n) for j in range(i + 1, n)]
+    # Costas cross-sum inequality at each lag d
     for d in range(1, n):
         for i in range(0, n - d):
             for j in range(i + 1, n - d):
-                S_left = add(R[i], R[j + d])  # f(i) + f(j+d)
-                S_right = add(R[j], R[i + d])  # f(j) + f(i+d)
-                clauses.append(
-                    "(" + "|".join(f"({a}^{b})" for a, b in zip(S_left, S_right)) + ")"
-                )
-    # symmetry break (horizontal reflection): p[1] < p[n]
+                L = ADD(R[i], R[j + d])  # f(i) + f(j+d)
+                Rhs = ADD(R[j], R[i + d])  # f(j) + f(i+d)
+                clauses.append(NE(L, Rhs))
+    # symmetry halving: p[1] < p[n]
     if n >= 2:
-        clauses.append(lt(R[0], R[n - 1]))
+        clauses.append(LT(R[0], R[n - 1]))
     expr = " & ".join(clauses)
-    var_order = [v for row in R for v in row]
-    return PhaseOracleGate(expr, var_order=var_order, label="CostasOracle"), m
+    return PhaseOracleGate(expr, label="CostasOracle"), m
 
 
 def decode(n: int, m: int, bitstr: str) -> list[int]:
-    bits = bitstr[::-1]  # little-endian
-    cols = []  # decode per-row m-bit int -> 1..n
-    for i in range(n):
-        v = 0
-        for k in range(m):
-            v |= (bits[i * m + k] == "1") << k
-        cols.append(v + 1)
-    return cols
+    bits = bitstr[::-1]  # little-endian measurement
+    return [1 + sum((bits[i * m + k] == "1") << k for k in range(m)) for i in range(n)]
 
 
 def is_costas(p: list[int]) -> bool:
-    s = set()
+    seen = set()
     for i in range(len(p)):
         for j in range(i + 1, len(p)):
             t = (j - i, p[j] - p[i])
-            if t in s:
+            if t in seen:
                 return False
-            s.add(t)
+            seen.add(t)
     return True
 
 
@@ -121,18 +117,18 @@ def plot_costas(p: list[int]):
 
 
 def generate_costas(n: int) -> CostasResult:
-    oracle, m = costas_oracle(n)
-    N = 2 ** (m * n)
+    oracle, qubits = costas_oracle(n)
     grover = Grover(sampler=StatevectorSampler(), sample_from_iterations=True)
     problem = AmplificationProblem(oracle)
-    result: GroverResult = grover.amplify(problem)
-    permutation = decode(n, m, result.top_measurement)  # type: ignore
+    result = grover.amplify(problem)
+    permutation = decode(n, qubits, result.top_measurement)  # type: ignore
     return CostasResult(
-        N=N,
-        iterations=result.iterations[-1],
+        order=n,
+        qubits=qubits,
         grover=grover,
         problem=problem,
         result=result,
+        iterations=result.iterations[-1],
         permutation=permutation,
         is_costas=is_costas(permutation),
     )
