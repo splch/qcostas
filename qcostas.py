@@ -1,4 +1,3 @@
-import math
 from dataclasses import dataclass
 import matplotlib.pyplot as plt
 from qiskit.circuit.library import PhaseOracleGate
@@ -9,8 +8,7 @@ from qiskit.primitives import StatevectorSampler
 @dataclass(frozen=True)
 class CostasResult:
     N: int
-    M: int
-    r: int
+    iterations: int
     permutation: list[int]
     is_costas: bool
     grover: Grover
@@ -18,24 +16,41 @@ class CostasResult:
     result: GroverResult
 
 
-def costas_oracle(n):
+def costas_oracle(n: int) -> tuple[PhaseOracleGate, int]:
     m = (n - 1).bit_length()
     V = lambda i, b: f"x{i}_{b}"
     XNOR = lambda a, b: f"~({a}^{b})"
-    eq = lambda A, B: "(" + "&".join(XNOR(a, b) for a, b in zip(A, B)) + ")"
     ne = lambda A, B: "(" + "|".join(f"({a}^{b})" for a, b in zip(A, B)) + ")"
 
-    def const_eq(A, v):
-        bits = [(v >> k) & 1 for k in range(m)]
-        return "(" + "&".join(A[k] if bits[k] else f"~{A[k]}" for k in range(m)) + ")"
+    def const_eq(A, v: int) -> str:
+        return (
+            "("
+            + "&".join((A[k] if ((v >> k) & 1) else f"~{A[k]}") for k in range(len(A)))
+            + ")"
+        )
 
-    def add(A, B):
+    def lt(A, B) -> str:
+        m = len(A)
+        terms = []
+        for k in range(m - 1, -1, -1):
+            eq_pref = (
+                "&".join(XNOR(A[j], B[j]) for j in range(k + 1, m))
+                if k < m - 1
+                else "1"
+            )
+            terms.append(
+                f"(({eq_pref})&(~{A[k]}&{B[k]}))"
+                if eq_pref != "1"
+                else f"(~{A[k]}&{B[k]})"
+            )
+        return "(" + "|".join(terms) + ")"
+
+    def add(A, B) -> list[str]:
         c = "0"
         S = []
         for k in range(m):
             ax, bx = A[k], B[k]
-            s = f"(({ax}^{bx})^{c})" if c != "0" else f"({ax}^{bx})"
-            S.append(s)
+            S.append(f"(({ax}^{bx})^{c})" if c != "0" else f"({ax}^{bx})")
             c = f"(({ax}&{bx})|(({ax}^{bx})&{c}))" if c != "0" else f"({ax}&{bx})"
         S.append(c)
         return S  # length m+1
@@ -43,27 +58,32 @@ def costas_oracle(n):
     R = [[V(i, k) for k in range(m)] for i in range(n)]
     clauses = []
     # domain r_i in {0,..,n-1}
-    for i in range(n):
-        for v in range(n, 1 << m):
-            clauses.append(f"~{const_eq(R[i],v)}")
+    if (1 << m) != n:
+        for i in range(n):
+            for v in range(n, 1 << m):
+                clauses.append(f"~{const_eq(R[i], v)}")
     # all-different rows
     for i in range(n):
         for j in range(i + 1, n):
             clauses.append(ne(R[i], R[j]))
     # Costas: differences unique at each lag d (use a+d == b+c equality test)
     for d in range(1, n):
-        P = [(i, i + d) for i in range(n - d)]
-        for a in range(len(P)):
-            for b in range(a + 1, len(P)):
-                i, j = P[a]
-                k, l = P[b]
-                clauses.append(f"~{eq(add(R[i],R[l]),add(R[j],R[k]))}")
+        for i in range(0, n - d):
+            for j in range(i + 1, n - d):
+                S_left = add(R[i], R[j + d])  # f(i) + f(j+d)
+                S_right = add(R[j], R[i + d])  # f(j) + f(i+d)
+                clauses.append(
+                    "(" + "|".join(f"({a}^{b})" for a, b in zip(S_left, S_right)) + ")"
+                )
+    # symmetry break (horizontal reflection): p[1] < p[n]
+    if n >= 2:
+        clauses.append(lt(R[0], R[n - 1]))
     expr = " & ".join(clauses)
     var_order = [v for row in R for v in row]
     return PhaseOracleGate(expr, var_order=var_order, label="CostasOracle"), m
 
 
-def decode(n, m, bitstr):
+def decode(n: int, m: int, bitstr: str) -> list[int]:
     bits = bitstr[::-1]  # little-endian
     cols = []  # decode per-row m-bit int -> 1..n
     for i in range(n):
@@ -74,7 +94,7 @@ def decode(n, m, bitstr):
     return cols
 
 
-def is_costas(p):
+def is_costas(p: list[int]) -> bool:
     s = set()
     for i in range(len(p)):
         for j in range(i + 1, len(p)):
@@ -85,7 +105,7 @@ def is_costas(p):
     return True
 
 
-def plot_costas(p):
+def plot_costas(p: list[int]):
     n = len(p)
     ax = plt.imshow(
         [[j + 1 == p[n - 1 - i] for j in range(n)] for i in range(n)],
@@ -100,21 +120,16 @@ def plot_costas(p):
     ax.grid(which="minor", c="#ccc")
 
 
-def generate_costas(n):
+def generate_costas(n: int) -> CostasResult:
     oracle, m = costas_oracle(n)
     N = 2 ** (m * n)
-    # approximate upper bound (doi:10.1109/TIT.2022.3202507)
-    M = round(math.factorial(n) * math.exp(-0.135 * n))
-    theta = math.asin(math.sqrt(M / N))
-    r = max(1, round(math.pi / (4 * theta)))  # near-optimal Grover iterations
-    grover = Grover(iterations=r, sampler=StatevectorSampler())
+    grover = Grover(sampler=StatevectorSampler(), sample_from_iterations=True)
     problem = AmplificationProblem(oracle)
-    result = grover.amplify(problem)
-    permutation = decode(n, m, result.top_measurement)
+    result: GroverResult = grover.amplify(problem)
+    permutation = decode(n, m, result.top_measurement)  # type: ignore
     return CostasResult(
         N=N,
-        M=M,
-        r=r,
+        iterations=result.iterations[-1],
         grover=grover,
         problem=problem,
         result=result,
